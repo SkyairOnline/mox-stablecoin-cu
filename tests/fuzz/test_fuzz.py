@@ -117,7 +117,7 @@ class StablecoinFuzzer(RuleBasedStateMachine):
                     self.weth.address, debt_to_cover
                 )
                 with boa.env.prank(LIQUIDATOR):
-                    self.mint_and_deposit(token_amount, 0, 0, user=user)
+                    self.mint_and_deposit(0, 0, token_amount, user=user)
                     self.dsce.liquidate(self.weth, user, debt_to_cover)
 
     def protocol_must_have_more_value_than_total_supply(self):
