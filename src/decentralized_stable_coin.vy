@@ -9,7 +9,9 @@
 
 from snekmate.tokens import erc20
 from snekmate.auth import ownable
+from interfaces import i_decentralized_stable_coin
 
+implements: i_decentralized_stable_coin
 initialized: ownable
 initialized: erc20[ownable := ownable]
 
@@ -27,6 +29,7 @@ SYMBOL: constant(String[5]) = "DSC"
 DECIMALS: constant(uint8) = 18
 EIP_712_VERSION: constant(String[20]) = "1"
 
+# Deploy
 @deploy
 def __init__():
     ownable.__init__()
