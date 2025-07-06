@@ -13,6 +13,7 @@
 from interfaces import i_decentralized_stable_coin
 from interfaces import AggregatorV3Interface
 from ethereum.ercs import IERC20
+from src import oracle_lib
 
 # State Variables
 DSC: public(immutable(i_decentralized_stable_coin))
@@ -98,7 +99,7 @@ def liquidate(collateral: address, user: address, debt_to_cover: uint256):
     starting_health_factor: uint256 = self._health_factor(user)
     assert starting_health_factor < MIN_HEALTH_FACTOR, "DSCEngine: Health factor is good"
 
-    token_amount_from_debt_covered: uint256 = self._get_token_ammount_from_usd(collateral, debt_to_cover)
+    token_amount_from_debt_covered: uint256 = self._get_token_amount_from_usd(collateral, debt_to_cover)
     bonus_collateral: uint256 = (token_amount_from_debt_covered * LIQUIDATION_BONUS) // LIQUIDATION_PRECISION
 
     self._redeem_collateral(
@@ -112,6 +113,60 @@ def liquidate(collateral: address, user: address, debt_to_cover: uint256):
     ending_health_factor: uint256 = self._health_factor(user)
     assert ending_health_factor >= starting_health_factor, "DSCEngine: Didn't improve health factor"
     self._revert_if_health_factor_broken(msg.sender)
+
+# Pure and View External Functions
+@external
+@view
+def health_factor(user: address) -> uint256:
+    return self._health_factor(user)
+
+
+@external
+@pure
+def calculate_health_factor(
+    total_dsc_minted: uint256, collateral_value_in_usd: uint256
+) -> uint256:
+    return self._calculate_health_factor(
+        total_dsc_minted, collateral_value_in_usd
+    )
+
+
+@external
+@view
+def get_account_information(user: address) -> (uint256, uint256):
+    return self._get_account_information(user)
+
+
+@external
+@view
+def get_usd_value(token: address, amount: uint256) -> uint256:
+    return self._get_usd_value(token, amount)
+
+
+@external
+@view
+def get_collateral_balance_of_user(user: address, token: address) -> uint256:
+    return self.user_to_token_to_amount_deposited[user][token]
+
+
+@external
+@view
+def get_account_collateral_value(user: address) -> uint256:
+    return self._get_account_collateral_value(user)
+
+
+@external
+@view
+def get_token_amount_from_usd(
+    token: address, usd_amount_in_wei: uint256
+) -> uint256:
+    return self._get_token_amount_from_usd(token, usd_amount_in_wei)
+
+
+@external
+@view
+def get_collateral_tokens() -> address[2]:
+    return COLLATERAL_TOKENS
 
 # Internal Functions
 @internal
@@ -163,6 +218,17 @@ def _revert_if_health_factor_broken(user: address):
     assert user_health_factor >= MIN_HEALTH_FACTOR, "DSCEngine: Health factor is broken"
 
 @internal
+def _burn_dsc(amount: uint256, on_behalf_of: address, dsc_from: address):
+    self.user_to_dsc_minted[on_behalf_of] -= amount
+    extcall DSC.burn_from(
+        dsc_from,
+        amount,
+    )
+
+# pure and view Internal Functions
+
+@internal
+@view
 def _get_account_information(user: address) -> (uint256, uint256):
     """
     @notice Returns the amount of DSC minted, collateral value
@@ -171,7 +237,44 @@ def _get_account_information(user: address) -> (uint256, uint256):
     collateral_value_in_usd: uint256 = self._get_account_collateral_value(user)
     return total_dsc_minted, collateral_value_in_usd
 
+
 @internal
+@view
+def _health_factor(user: address) -> uint256:
+    total_dsc_minted: uint256 = 0
+    total_collateral_value_usd: uint256 = 0
+    total_dsc_minted, total_collateral_value_usd = self._get_account_information(user)
+    return self._calculate_health_factor(total_dsc_minted, total_collateral_value_usd)
+
+@internal
+@view
+def _get_usd_value(token: address, amount: uint256) -> uint256:
+    price_feed: AggregatorV3Interface = AggregatorV3Interface(
+        self.token_to_price_feed[token]
+    )
+    round_id: uint80 = 0
+    price: int256 = 0
+    started_at: uint256 = 0
+    updated_at: uint256 = 0
+    answered_in_round: uint80 = 0
+    (
+        round_id, price, started_at, updated_at, answered_in_round
+    ) = oracle_lib._stale_check_latest_round_data(price_feed.address)
+    return (
+        (convert(price, uint256) * ADDITIONAL_FEED_PRECISION) * amount
+    ) // PRECISION
+
+
+@internal
+@pure
+def _calculate_health_factor(total_dsc_minted: uint256, total_collateral_value_usd: uint256) -> uint256:
+    if total_dsc_minted == 0:
+        return max_value(uint256)
+    collateral_adjusted_for_threshold: uint256 = (total_collateral_value_usd * LIQUIDATION_THRESHOLD) // LIQUIDATION_PRECISION
+    return (collateral_adjusted_for_threshold * PRECISION) // total_dsc_minted
+
+@internal
+@view
 def _get_account_collateral_value(user: address) -> uint256:
     """
     @notice Returns the total collateral value for a user
@@ -182,42 +285,25 @@ def _get_account_collateral_value(user: address) -> uint256:
         total_collateral_value_usd += self._get_usd_value(token_address, amount)
     return total_collateral_value_usd
 
-@internal
-@view
-def _get_usd_value(token: address, amount: uint256) -> uint256:
-    price_feed: AggregatorV3Interface = AggregatorV3Interface(self.token_to_price_feed[token])
-    price: int256 = staticcall price_feed.latestAnswer()
-    return (((convert(price, uint256) * ADDITIONAL_FEED_PRECISION)) * amount) // PRECISION
 
 @internal
 @view
-def _get_token_ammount_from_usd(token: address, usd_amount_in_wei: uint256) -> uint256:
-    """
-    @notice Returns the amount of tokens needed to cover a certain USD amount
-    """
-    price_feed: AggregatorV3Interface = AggregatorV3Interface(self.token_to_price_feed[token])
-    price: int256 = staticcall price_feed.latestAnswer()
-    return (usd_amount_in_wei * PRECISION) // (convert(price, uint256) * ADDITIONAL_FEED_PRECISION)
-
-@internal
-def _health_factor(user: address) -> uint256:
-    total_dsc_minted: uint256 = 0
-    total_collateral_value_usd: uint256 = 0
-    total_dsc_minted, total_collateral_value_usd = self._get_account_information(user)
-    
-    return self._calculate_health_factor(total_dsc_minted, total_collateral_value_usd)
-
-@internal
-def _calculate_health_factor(total_dsc_minted: uint256, total_collateral_value_usd: uint256) -> uint256:
-    if total_dsc_minted == 0:
-        return max_value(uint256)
-    collateral_adjusted_for_threshold: uint256 = (total_collateral_value_usd * LIQUIDATION_THRESHOLD) // LIQUIDATION_PRECISION
-    return (collateral_adjusted_for_threshold * PRECISION) // total_dsc_minted
-
-@internal
-def _burn_dsc(amount: uint256, on_behalf_of: address, dsc_from: address):
-    self.user_to_dsc_minted[on_behalf_of] -= amount
-    extcall DSC.burn_from(
-        dsc_from,
-        amount,
+def _get_token_amount_from_usd(
+    token: address, usd_amount_in_wei: uint256
+) -> uint256:
+    price_feed: AggregatorV3Interface = AggregatorV3Interface(
+        self.token_to_price_feed[token]
+    )
+    round_id: uint80 = 0
+    price: int256 = 0
+    started_at: uint256 = 0
+    updated_at: uint256 = 0
+    answered_in_round: uint80 = 0
+    (
+        round_id, price, started_at, updated_at, answered_in_round
+    ) = oracle_lib._stale_check_latest_round_data(price_feed.address)
+    return (
+        (usd_amount_in_wei * PRECISION) // (
+            convert(price, uint256) * ADDITIONAL_FEED_PRECISION
+        )
     )
