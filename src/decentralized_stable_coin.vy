@@ -12,8 +12,8 @@ from snekmate.auth import ownable
 from interfaces import i_decentralized_stable_coin
 
 implements: i_decentralized_stable_coin
-initialized: ownable
-initialized: erc20[ownable := ownable]
+initializes: ownable
+initializes: erc20[ownable := ownable]
 
 exports: (
     erc20.IERC20,
